@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  mysql_db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./db_init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  order-service:
+    build: ./order-service
+    ports:
+      - "8000:8000"
+    depends_on:
+      mysql_db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      - DB_URL=mysql+pymysql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}/${DB_NAME}
+      - RABBITMQ_HOST=${RABBITMQ_HOST}
+
+  inventory-consumer:
+    build: ./inventory-consumer
+    depends_on:
+      mysql_db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      - DB_URL=mysql+pymysql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}/${DB_NAME}
+      - RABBITMQ_HOST=${RABBITMQ_HOST}
