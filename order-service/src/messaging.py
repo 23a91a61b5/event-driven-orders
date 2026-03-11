@@ -3,8 +3,12 @@ import json
 import os
 import threading
 import time
+from sqlalchemy import exc
 from .database import SessionLocal
-from .models import Order
+from .models import Order, OutboxEvent
+from .logger import setup_logger
+
+logger = setup_logger('order_service.messaging')
 
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "rabbitmq")
 
@@ -30,9 +34,9 @@ def publish_event(queue_name, message):
             properties=pika.BasicProperties(delivery_mode=2) # Persistent message
         )
         connection.close()
-        print(f"Event published to {queue_name}")
+        logger.info(f"Event published to {queue_name}", extra={'event_type': message.get('type'), 'orderId': message.get('orderId')})
     except Exception as e:
-        print(f"Failed to publish message: {e}")
+        logger.error(f"Failed to publish message: {e}", exc_info=True)
 
 # Consumer: Listens for Inventory Updates (Success/Fail)
 def start_status_consumer():
@@ -42,7 +46,7 @@ def start_status_consumer():
 
     def callback(ch, method, properties, body):
         data = json.loads(body)
-        print(f"Received status update: {data}")
+        logger.info(f"Received status update", extra={'data': data})
         
         db = SessionLocal()
         try:
@@ -52,21 +56,55 @@ def start_status_consumer():
                     order.status = 'PROCESSING'
                 elif data['type'] == 'InventoryFailed':
                     order.status = 'FAILED'
+                    # Initiate Compensation
+                    logger.warning(f"Initiating compensation for order {order.id}", extra={'orderId': order.id})
+                    publish_event('order_compensation', {
+                        'type': 'OrderFailedCompensation',
+                        'orderId': order.id,
+                        'reason': data.get('reason', 'Inventory Failed')
+                    })
                 
                 db.commit()
-                print(f"Order {order.id} status updated to {order.status}")
+                logger.info(f"Order status updated", extra={'orderId': order.id, 'status': order.status})
         except Exception as e:
-            print(f"Error updating order: {e}")
+            logger.error(f"Error updating order", exc_info=True)
         finally:
             db.close()
             ch.basic_ack(delivery_tag=method.delivery_tag)
 
     channel.basic_consume(queue='inventory_updates', on_message_callback=callback)
-    print("Order Service Listening for Inventory Updates...")
-    channel.start_consuming()
+    logger.info("Order Service Listening for Inventory Updates...")
+    try:
+        channel.start_consuming()
+    except Exception as e:
+        logger.error(f"Consumer error", exc_info=True)
 
-# Run consumer in a background thread so it doesn't block the API
+# Poller: Scans OutboxEvent for pending messages
+def start_outbox_poller():
+    logger.info("Starting outbox poller thread...")
+    while True:
+        try:
+            db = SessionLocal()
+            pending_events = db.query(OutboxEvent).filter(OutboxEvent.status == 'PENDING').limit(50).with_for_update(skip_locked=True).all()
+            for event in pending_events:
+                queue_name = event.type
+                payload = json.loads(event.payload)
+                publish_event(queue_name, payload)
+                
+                event.status = 'PROCESSED'
+                
+            db.commit()
+            db.close()
+        except Exception as e:
+            logger.error(f"Error in outbox poller loop: {e}")
+        time.sleep(2)
+
+# Run consumer and poller in background threads
 def run_consumer_thread():
-    t = threading.Thread(target=start_status_consumer)
-    t.daemon = True
-    t.start()
+    t1 = threading.Thread(target=start_status_consumer)
+    t1.daemon = True
+    t1.start()
+    
+    t2 = threading.Thread(target=start_outbox_poller)
+    t2.daemon = True
+    t2.start()

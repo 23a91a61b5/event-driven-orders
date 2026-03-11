@@ -3,6 +3,9 @@ import json
 import os
 import time
 from sqlalchemy import create_engine, text
+from logger import setup_logger
+
+logger = setup_logger('inventory_consumer')
 
 # Configuration
 DB_URL = os.getenv("DB_URL")
@@ -15,9 +18,9 @@ while not engine:
         engine = create_engine(DB_URL)
         # Test connection
         with engine.connect() as conn:
-            print("Successfully connected to Database")
+            logger.info("Successfully connected to Database")
     except Exception as e:
-        print(f"Waiting for Database... ({e})")
+        logger.warning(f"Waiting for Database... ({e})")
         time.sleep(5)
 
 # 2. RabbitMQ Connection with Retry Logic
@@ -26,7 +29,7 @@ def get_rabbitmq_connection():
         try:
             return pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
         except Exception as e:
-            print(f"Waiting for RabbitMQ... ({e})")
+            logger.warning(f"Waiting for RabbitMQ... ({e})")
             time.sleep(5)
 
 # Helper to publish events back to Order Service
@@ -42,7 +45,7 @@ def publish_update(channel, message):
 # 3. Core Logic: Process the Order
 def process_order(ch, method, properties, body):
     data = json.loads(body)
-    print(f"Processing Order: {data['orderId']}")
+    logger.info(f"Processing Order: {data.get('orderId')}", extra={'orderId': data.get('orderId')})
     
     order_id = data['orderId']
     items = data['items']
@@ -83,21 +86,21 @@ def process_order(ch, method, properties, body):
     except Exception as e:
         success = False
         reason = f"Database Error: {str(e)}"
-        print(reason)
+        logger.error(reason, exc_info=True)
 
     # 4. Publish Result (Success or Failure)
     connection = get_rabbitmq_connection()
     channel = connection.channel()
     
     if success:
-        print(f"SUCCESS: Inventory deducted for Order {order_id}")
+        logger.info(f"SUCCESS: Inventory deducted for Order {order_id}", extra={'orderId': order_id, 'items': items})
         publish_update(channel, {
             "type": "InventoryDeducted",
             "orderId": order_id,
             "deductedItems": items
         })
     else:
-        print(f"FAILED: Inventory check failed for Order {order_id}. Reason: {reason}")
+        logger.warning(f"FAILED: Inventory check failed for Order {order_id}. Reason: {reason}", extra={'orderId': order_id, 'reason': reason})
         publish_update(channel, {
             "type": "InventoryFailed",
             "orderId": order_id,
@@ -109,21 +112,34 @@ def process_order(ch, method, properties, body):
     # Acknowledge message so RabbitMQ removes it from queue
     ch.basic_ack(delivery_tag=method.delivery_tag)
 
+def process_compensation(ch, method, properties, body):
+    data = json.loads(body)
+    order_id = data.get('orderId')
+    reason = data.get('reason')
+    logger.info(f"Received Compensation for Order {order_id}. Reason: {reason}", extra={'orderId': order_id, 'compensation_reason': reason})
+    # In a real system, we'd roll back any resources. Here, inventory didn't pass, so no inventory to rollback.
+    # Just acknowledge.
+    ch.basic_ack(delivery_tag=method.delivery_tag)
+
 def main():
-    print("Starting Inventory Consumer...")
+    logger.info("Starting Inventory Consumer...")
     connection = get_rabbitmq_connection()
     channel = connection.channel()
     
     # Listen to 'order_created' queue
     channel.queue_declare(queue='order_created', durable=True)
-    
-    # Process 1 message at a time to ensure fair load balancing
     channel.basic_qos(prefetch_count=1)
-    
     channel.basic_consume(queue='order_created', on_message_callback=process_order)
+
+    # Listen to 'order_compensation' queue
+    channel.queue_declare(queue='order_compensation', durable=True)
+    channel.basic_consume(queue='order_compensation', on_message_callback=process_compensation)
     
-    print(" [*] Waiting for orders. To exit press CTRL+C")
-    channel.start_consuming()
+    logger.info(" [*] Waiting for orders and compensations. To exit press CTRL+C")
+    try:
+        channel.start_consuming()
+    except Exception as e:
+        logger.error(f"Consumer error", exc_info=True)
 
 if __name__ == "__main__":
     main()

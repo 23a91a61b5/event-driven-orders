@@ -1,7 +1,23 @@
-from sqlalchemy import Column, String, Integer, DECIMAL, DateTime, ForeignKey
+from sqlalchemy import Column, String, Integer, DECIMAL, DateTime, ForeignKey, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from .database import Base
+
+class Product(Base):
+    __tablename__ = "products"
+    
+    id = Column(String(36), primary_key=True)
+    name = Column(String(255), nullable=False)
+    price = Column(DECIMAL(10, 2), nullable=False)
+
+class OutboxEvent(Base):
+    __tablename__ = "outbox_events"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    type = Column(String(50), nullable=False)
+    payload = Column(Text, nullable=False)
+    status = Column(String(20), default="PENDING")
+    createdAt = Column(DateTime, default=datetime.utcnow)
 
 class Order(Base):
     __tablename__ = "orders"

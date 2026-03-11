@@ -6,3 +6,6 @@ pika
 cryptography
 pytest
 httpx
+python-json-logger==2.0.7
+pytest==7.4.2
+httpx==0.25.0

@@ -29,6 +29,7 @@ services:
 
   order-service:
     build: ./order-service
+    restart: on-failure
     ports:
       - "8000:8000"
     depends_on:
@@ -37,16 +38,27 @@ services:
       rabbitmq:
         condition: service_healthy
     environment:
-      - DB_URL=mysql+pymysql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}/${DB_NAME}
+      - DB_URL=mysql+pymysql://${DB_USER}:${DB_PASSWORD}@mysql_db/${DB_NAME}
       - RABBITMQ_HOST=${RABBITMQ_HOST}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/orders')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   inventory-consumer:
     build: ./inventory-consumer
+    restart: on-failure
     depends_on:
       mysql_db:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
     environment:
-      - DB_URL=mysql+pymysql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}/${DB_NAME}
+      - DB_URL=mysql+pymysql://${DB_USER}:${DB_PASSWORD}@mysql_db/${DB_NAME}
       - RABBITMQ_HOST=${RABBITMQ_HOST}
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'python main.py' > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
